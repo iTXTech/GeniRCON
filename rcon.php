@@ -108,9 +108,9 @@ class GeniRCON{
 	private $socket;
 
 	private $authorized;
-	private $lastResponse;
+	private $lastResponse = null;
 
-	const PROTOCOL_VERSION = 1;
+	const PROTOCOL_VERSION = 2;
 
 	const PACKET_AUTHORIZE = 5;
 	const PACKET_COMMAND = 6;
@@ -665,7 +665,7 @@ class MainLogger extends \Thread{
 }
 
 class GeniRCONClient{
-	const VER = "v1.0.2 alpha";
+	const VER = "v1.0.3 alpha";
 
 	/** @var ConsoleDaemon */
 	private $console = null;
@@ -676,6 +676,7 @@ class GeniRCONClient{
 	private $logger = null;
 	private $info = [];
 	private $ticks = 0;
+	private $lookup = [];
 
 	public function __construct(){
 		Terminal::init();
@@ -698,16 +699,47 @@ class GeniRCONClient{
 			if($this->rcon != null){
 				$this->rcon->getRemoteLogger();
 				$res = $this->rcon->getResponse();
-				if($res != $this->lastPrintedInfo and $res != null){
+				if($res != null){
 					$res = explode("\n", $res);
 					foreach($res as $line){
-						if(trim($line) != "")
-							$this->logger->info($line, "RCON");
+						if(trim($line) != "") {
+							$j = explode("|", $line);
+							if(count($j) >= 3){
+								$color = array_shift($j);
+								$prefix = array_shift($j);
+								$line = implode("|", $j);
+							}else{
+								$color = TextFormat::WHITE;
+								$prefix = "INFO";
+							}
+							$this->logger->info($line, "RCON / $prefix", $color);
+						}
 					}
 				}
 				sleep(0.01);
 			}
 		}
+	}
+
+	private function lookupAddress($address) {
+		//IP address
+		if (preg_match("/^[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}$/", $address) > 0) {
+			return $address;
+		}
+
+		$address = strtolower($address);
+
+		if (isset($this->lookup[$address])) {
+			return $this->lookup[$address];
+		}
+
+		$host = gethostbyname($address);
+		if ($host === $address) {
+			return null;
+		}
+
+		$this->lookup[$address] = $host;
+		return $host;
 	}
 
 	public function closeSession(){
@@ -730,15 +762,13 @@ class GeniRCONClient{
 				}else $this->logger->warning("You haven't connected to any server yet");
 
 				break;
-
 			case "version":
 				if($this->rcon == null){
 					$this->logger->info(TextFormat::AQUA . "GeniRCON Client" . TextFormat::WHITE . " [version: " . TextFormat::LIGHT_PURPLE . self::VER . TextFormat::WHITE . "] (protocol version: " . TextFormat::GOLD . GeniRCON::PROTOCOL_VERSION . TextFormat::WHITE . ")");
 				}else $this->rcon->sendCommand($cmd);
+
 				break;
-
 			case "exit":
-
 				$this->logger->info("Stopping GeniRCON Client ...");
 				$this->closeSession();
 				$this->console->shutdown();
@@ -747,8 +777,8 @@ class GeniRCONClient{
 				$this->isRunning = false;
 				echo("GeniRCON Client has stopped" . PHP_EOL);
 				exit(0);
-				break;
 
+				break;
 			case "help":
 				if($this->rcon == null){
 					$commandList = [
@@ -770,15 +800,15 @@ class GeniRCONClient{
 						}else $this->logger->alert("No help for " . $c[0]);
 					}
 				}else $this->rcon->sendCommand($cmd);
-				break;
 
+				break;
 			case "connect":
 				$info = $c;
 				if(count($info) != 4){
 					$this->logger->warning("Wrong format! Please try again");
 				}else{
 					$this->info = $info;
-					$this->rcon = new GeniRCON($this->logger, $info[0], $info[1], $info[2], $info[3]);
+					$this->rcon = new GeniRCON($this->logger, $this->lookupAddress($info[0]), $info[1], $info[2], $info[3]);
 					$this->logger->notice("GeniRCON session has been created!");
 					$this->logger->info("Connecting to " . $info[0] . ":" . $info[1] . " ...");
 					if($this->rcon->connect()){
@@ -788,15 +818,14 @@ class GeniRCONClient{
 						$this->rcon = null;
 					}
 				}
-				break;
 
+				break;
 			case "stop":
 				if($this->rcon != null){
 					$this->rcon->sendCommand($cmd, true);
 					$this->closeSession();
-					break;
-				}
-
+				}else $this->logger->alert("Command not found. Type 'help' for help");
+				break;
 			default:
 				if($this->rcon == null) $this->logger->alert("Command not found. Type 'help' for help");
 				else $this->rcon->sendCommand($cmd);
