@@ -104,6 +104,7 @@ class GeniRCON{
 	private $port;
 	private $password;
 	private $timeout;
+	private $id;
 
 	private $socket;
 
@@ -127,13 +128,33 @@ class GeniRCON{
 	/** @var MainLogger */
 	private $logger;
 
-	public function __construct(MainLogger $logger, $host, $port, $password, $timeout){
+	public function __construct(MainLogger $logger, string $host, int $port, string $password, int $timeout, $id){
 		$this->logger = $logger;
 		$this->host = $host;
 		$this->port = $port;
 		$this->password = $password;
 		$this->timeout = $timeout;
+		$this->id = $id;
+	}
 
+	public function getHost() : string{
+		return $this->host;
+	}
+
+	public function getPort() : int{
+		return $this->port;
+	}
+
+	public function getPassword() : string{
+		return $this->password;
+	}
+
+	public function getTimeout() : int{
+		return $this->timeout;
+	}
+
+	public function getSessionId(){
+		return $this->id;
 	}
 
 	public function getResponse(){
@@ -171,9 +192,11 @@ class GeniRCON{
 	}
 
 	public function disconnect(){
+		$this->logger->notice("Disconnecting from session " . $this->getSessionId() . " (". $this->getHost() . ":" . $this->getPort() . ")");
 		if($this->socket){
 			fclose($this->socket);
 		}
+		$this->logger->notice("Disconnected from session " . $this->getSessionId() . " (". $this->getHost() . ":" . $this->getPort() . ")");
 	}
 
 	public function isConnected(){
@@ -218,7 +241,7 @@ class GeniRCON{
 		return false;
 	}
 
-	private function getRemoteProtocol(){
+	public function getRemoteProtocol(){
 		$this->writePacket(self::PACKET_PROTOCOL_CHECK, self::SERVERDATA_PROTOCOL, self::PROTOCOL_VERSION);
 		$pk = $this->readPacket();
 
@@ -665,18 +688,28 @@ class MainLogger extends \Thread{
 }
 
 class GeniRCONClient{
-	const VER = "v1.0.3 alpha";
+	const VER = "v1.1.0 alpha";
 
 	/** @var ConsoleDaemon */
 	private $console = null;
-	/** @var GeniRCON */
-	private $rcon = null;
+	/** @var GeniRCON[] */
+	private $sessions = [];
+	private $currentSessionId = null;
 	private $isRunning = true;
 	/** @var MainLogger */
 	private $logger = null;
-	private $info = [];
 	private $ticks = 0;
 	private $lookup = [];
+
+	private $commandList = [
+		"connect" => ["connect <host> <port> <password> <timeout> (SessionID)", "Connect to a server. If SessionID is empty, client will auto generate one."],
+		"disconnect" => ["disconnect (Session ID)", "Disconnect from a session"],
+		"exit" => ["exit", "Shutdown this program and exit"],
+		"help" => ["help (CommandName)", "Show the help menu"],
+		"list" => ["list", "List all connected sessions"],
+		"session" => ["session <SessionID>", "Change current session"],
+		"version" => ["version", "Gets the version of this program"]
+	];
 
 	public function __construct(){
 		Terminal::init();
@@ -685,8 +718,20 @@ class GeniRCONClient{
 		$this->logger->info("GeniRCON Protocol Version: " . TextFormat::LIGHT_PURPLE . GeniRCON::PROTOCOL_VERSION);
 		$this->logger->info("Initializing ConsoleDaemon ...");
 		$this->console = new ConsoleDaemon();
-		$this->logger->info("Done! For help, type 'help'");
+		$this->logger->info("Done! For help, type '/help'");
 		$this->tickProcessor();
+	}
+
+	/**
+	 * @return GeniRCON|null
+	 */
+	public function getCurrentSession(){
+		if($this->currentSessionId != null){
+			if(isset($this->sessions[$this->currentSessionId])){
+				return $this->sessions[$this->currentSessionId];
+			}
+		}
+		return null;
 	}
 
 	public function tickProcessor(){
@@ -696,13 +741,13 @@ class GeniRCONClient{
 			if($cmd != null){
 				$this->dispatchCommand($cmd);
 			}
-			if($this->rcon != null){
-				$this->rcon->getRemoteLogger();
-				$res = $this->rcon->getResponse();
+			if($this->getCurrentSession() != null){
+				$this->getCurrentSession()->getRemoteLogger();
+				$res = $this->getCurrentSession()->getResponse();
 				if($res != null){
 					$res = explode("\n", $res);
 					foreach($res as $line){
-						if(trim($line) != "") {
+						if(trim($line) != ""){
 							$j = explode("|", $line);
 							if(count($j) >= 3){
 								$color = array_shift($j);
@@ -712,7 +757,7 @@ class GeniRCONClient{
 								$color = TextFormat::WHITE;
 								$prefix = "INFO";
 							}
-							$this->logger->info($line, "RCON / $prefix", $color);
+							$this->logger->info($line, $this->currentSessionId . " / $prefix", $color);
 						}
 					}
 				}
@@ -721,20 +766,20 @@ class GeniRCONClient{
 		}
 	}
 
-	private function lookupAddress($address) {
+	private function lookupAddress($address){
 		//IP address
-		if (preg_match("/^[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}$/", $address) > 0) {
+		if(preg_match("/^[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}$/", $address) > 0){
 			return $address;
 		}
 
 		$address = strtolower($address);
 
-		if (isset($this->lookup[$address])) {
+		if(isset($this->lookup[$address])){
 			return $this->lookup[$address];
 		}
 
 		$host = gethostbyname($address);
-		if ($host === $address) {
+		if($host === $address){
 			return null;
 		}
 
@@ -742,94 +787,111 @@ class GeniRCONClient{
 		return $host;
 	}
 
-	public function closeSession(){
-		if($this->rcon != null){
-			$this->logger->info("Disconnecting from " . $this->info[0] . ":" . $this->info[1]);
-			$this->rcon->disconnect();
-		}
-	}
-
 	public function dispatchCommand(string $cmd){
-		$c = explode(" ", $cmd);
-		$co = array_shift($c);
-		switch(strtolower($co)){
-			case "disconnect":
-				if($this->rcon != null){
-					$this->logger->notice("Disconnecting from " . $this->info[0] . ":" . $this->info[1]);
-					$this->rcon->disconnect();
-					$this->rcon = null;
-					$this->logger->info("Disconnected from " . $this->info[0] . ":" . $this->info[1]);
-				}else $this->logger->warning("You haven't connected to any server yet");
+		$args = explode(" ", $cmd);
+		$command = str_split(array_shift($args));
+		$isClientCommand = false;
+		if($command[0] == "/"){
+			$isClientCommand = true;
+			array_shift($command);
+		}
+		$command = implode("", $command);
+		if($isClientCommand){
+			switch(strtolower($command)){
+				case "disconnect":
+					$id = $this->currentSessionId;
+					if(isset($args[0])) $id = $args[0];
+					if($id == null) $this->logger->warning("Current session is empty!");
+					else{
+						if(isset($this->sessions[$id])){
+							$this->sessions[$id]->disconnect();
+							if($id == $this->currentSessionId) $this->currentSessionId = null;
+							unset($this->sessions[$id]);
+						}else $this->logger->warning("Invalid session ID!");
+					}
 
-				break;
-			case "version":
-				if($this->rcon == null){
+					break;
+				case "version":
 					$this->logger->info(TextFormat::AQUA . "GeniRCON Client" . TextFormat::WHITE . " [version: " . TextFormat::LIGHT_PURPLE . self::VER . TextFormat::WHITE . "] (protocol version: " . TextFormat::GOLD . GeniRCON::PROTOCOL_VERSION . TextFormat::WHITE . ")");
-				}else $this->rcon->sendCommand($cmd);
 
-				break;
-			case "exit":
-				$this->logger->info("Stopping GeniRCON Client ...");
-				$this->closeSession();
-				$this->console->shutdown();
-				$this->console->quit();
-				$this->logger->shutdown();
-				$this->isRunning = false;
-				echo("GeniRCON Client has stopped" . PHP_EOL);
-				exit(0);
+					break;
+				case "exit":
+					$this->logger->info("Stopping GeniRCON Client ...");
+					foreach($this->sessions as $session) $session->disconnect();
+					$this->console->shutdown();
+					$this->console->quit();
+					$this->logger->shutdown();
+					$this->isRunning = false;
+					echo("GeniRCON Client has stopped" . PHP_EOL);
+					exit(0);
 
-				break;
-			case "help":
-				if($this->rcon == null){
-					$commandList = [
-						"connect" => ["connect <host> <port> <password> <timeout>", "Connect to a server"],
-						"disconnect" => ["disconnect", "Disconnect from current session"],
-						"exit" => ["exit", "Shutdown this program and exit"],
-						"version" => ["version", "Gets the version of this program"]
-					];
-					if(count($c) == 0){
-						$this->logger->info("------- Help -------");
-						foreach($commandList as $k => $cmd){
-							$this->logger->info(TextFormat::DARK_GREEN . $k . ": " . TextFormat::WHITE . $cmd[1]);
+					break;
+				case "help":
+						if(count($args) == 0){
+							$this->logger->info("-------  Help  -------");
+							foreach($this->commandList as $k => $cmd){
+								$this->logger->info("/" . TextFormat::DARK_GREEN . $k . ": " . TextFormat::WHITE . $cmd[1]);
+							}
+						}else{
+							if(isset($this->commandList[$args[0]])){
+								$this->logger->info(TextFormat::YELLOW . "-------" . TextFormat::WHITE . "  Help: /" . $args[0] . "  " . TextFormat::YELLOW . "-------");
+								$this->logger->info(TextFormat::GOLD . "Description: " . TextFormat::WHITE . $this->commandList[$args[0]][1]);
+								$this->logger->info(TextFormat::GOLD . "Usage: " . TextFormat::WHITE . "/" . $this->commandList[$args[0]][0]);
+							}else $this->logger->alert("No help for " . $args[0]);
 						}
-					}else{
-						if(isset($commandList[$c[0]])){
-							$this->logger->info(TextFormat::YELLOW . "-------" . TextFormat::WHITE . " Help: " . $c[0] . " " . TextFormat::YELLOW . "-------");
-							$this->logger->info(TextFormat::GOLD . "Description: " . TextFormat::WHITE . $commandList[$c[0]][1]);
-							$this->logger->info(TextFormat::GOLD . "Usage: " . TextFormat::WHITE . $commandList[$c[0]][0]);
-						}else $this->logger->alert("No help for " . $c[0]);
-					}
-				}else $this->rcon->sendCommand($cmd);
 
-				break;
-			case "connect":
-				$info = $c;
-				if(count($info) != 4){
-					$this->logger->warning("Wrong format! Please try again");
-				}else{
-					$this->info = $info;
-					$this->rcon = new GeniRCON($this->logger, $this->lookupAddress($info[0]), $info[1], $info[2], $info[3]);
-					$this->logger->notice("GeniRCON session has been created!");
-					$this->logger->info("Connecting to " . $info[0] . ":" . $info[1] . " ...");
-					if($this->rcon->connect()){
-						$this->logger->info("Connected!");
+					break;
+				case "connect":
+					if(count($args) < 4){
+						$this->logger->warning("Wrong format! Please try again");
 					}else{
-						$this->logger->error("Failed to connect to " . $info[0] . ":" . $info[1]);
-						$this->rcon = null;
+						$id = mt_rand(100000000, 200000000);
+						if(isset($args[4])){
+							if(trim($args[4])) $id = $args[4];
+						}
+						$this->currentSessionId = $id;
+						$this->sessions[$id] = new GeniRCON($this->logger, $this->lookupAddress($args[0]), $args[1], $args[2], $args[3], $id);
+						$this->logger->notice("GeniRCON session has been created! ID: " . TextFormat::GOLD . $id);
+						$this->logger->info("Connecting to " . $args[0] . ":" . $args[1] . " ...");
+						if($this->getCurrentSession()->connect()){
+							$this->logger->info("Connected!");
+						}else{
+							$this->logger->error("Failed to connect to " . $args[0] . ":" . $args[1]);
+							$this->sessions[$id] = null;
+						}
 					}
-				}
 
-				break;
-			case "stop":
-				if($this->rcon != null){
-					$this->rcon->sendCommand($cmd, true);
-					$this->closeSession();
-				}else $this->logger->alert("Command not found. Type 'help' for help");
-				break;
-			default:
-				if($this->rcon == null) $this->logger->alert("Command not found. Type 'help' for help");
-				else $this->rcon->sendCommand($cmd);
-				break;
+					break;
+				case "list":
+					$this->logger->info("There are " . TextFormat::GREEN . count($this->sessions) . TextFormat::WHITE . " connected sessions:");
+					foreach($this->sessions as $id => $session){
+						$this->logger->info("SessionID: " . TextFormat::AQUA . $id . TextFormat::WHITE .
+							" Address: " . TextFormat::YELLOW . $session->getHost() . ":" . $session->getPort() . TextFormat::WHITE .
+							" Timeout: " . TextFormat::DARK_PURPLE . $session->getTimeout()
+						);
+					}
+
+					break;
+				case "session":
+					if(count($args) != 1){
+						$this->logger->warning("Wrong format! Please try again");
+					}else{
+						$id = $args[0];
+						if(isset($this->sessions[$id])) {
+							$this->currentSessionId = $id;
+							$this->getCurrentSession()->getRemoteProtocol();//RE-activate remote logger
+							$this->logger->info("Current session has successfully changed to ". TextFormat::GREEN . $id);
+						}else $this->logger->alert("Invalid session id $id");
+					}
+					break;
+				default:
+					$this->logger->alert("Command not found. Type '/help' for help");
+					break;
+			}
+		}else{
+			if($this->getCurrentSession() != null){
+				$this->getCurrentSession()->sendCommand($cmd);
+			}else $this->logger->warning("Current session is empty! Type '/connect' to create a new session or type '/session' to switch to another session.");
 		}
 	}
 }
