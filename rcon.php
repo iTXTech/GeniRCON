@@ -110,8 +110,9 @@ class GeniRCON{
 
 	private $authorized;
 	private $lastResponse = null;
+	private $lastStatus;
 
-	const PROTOCOL_VERSION = 2;
+	const PROTOCOL_VERSION = 3;
 
 	const PACKET_AUTHORIZE = 5;
 	const PACKET_COMMAND = 6;
@@ -161,6 +162,10 @@ class GeniRCON{
 		$res = $this->lastResponse;
 		$this->lastResponse = null;
 		return $res;
+	}
+	
+	public function getStatus(){
+	return $this->lastStatus;
 	}
 
 	public function connect(){
@@ -213,7 +218,10 @@ class GeniRCON{
 		if($pk['id'] == self::PACKET_LOGGER){
 			if($pk['type'] == self::SERVERDATA_RESPONSE_VALUE){
 				if($pk["body"] != ""){
-					$this->lastResponse .= "\n" . $pk['body'];
+				//$res = json_decode(, true);
+				$res = unserialize($pk["body"]);
+					$this->lastResponse .= "\n" . $res["logger"];
+					$this->lastStatus = $res["serverStatus"];
 					return $pk['body'];
 				}
 			}
@@ -688,7 +696,7 @@ class MainLogger extends \Thread{
 }
 
 class GeniRCONClient{
-	const VER = "v1.1.0 alpha";
+	const VER = "v1.2.0 alpha";
 
 	/** @var ConsoleDaemon */
 	private $console = null;
@@ -734,6 +742,10 @@ class GeniRCONClient{
 		return null;
 	}
 
+	public function getName() : string{
+		return "GeniRCON Client";
+	}
+
 	public function tickProcessor(){
 		while($this->isRunning){
 			$this->ticks++;
@@ -744,6 +756,20 @@ class GeniRCONClient{
 			if($this->getCurrentSession() != null){
 				$this->getCurrentSession()->getRemoteLogger();
 				$res = $this->getCurrentSession()->getResponse();
+				if(($this->ticks % 40) == 0){
+					$status = $this->getCurrentSession()->getStatus();
+
+					//Title
+
+					echo "\x1b]0;" . $this->getName() . " " .
+						" | Online " . $status["online"] . "/" . $status["max"] .
+						" | Memory " . $status["usage"] .
+						" | U " . $status["upload"] .
+						" D " . $status["download"] .
+						" kB/s | TPS " . $status["tps"] .
+						" | Load " . $status["load"] . "%\x07";
+				}
+
 				if($res != null){
 					$res = explode("\n", $res);
 					foreach($res as $line){
@@ -761,8 +787,8 @@ class GeniRCONClient{
 						}
 					}
 				}
-				sleep(0.01);
 			}
+			sleep(0.05);
 		}
 	}
 
@@ -807,12 +833,12 @@ class GeniRCONClient{
 							$this->sessions[$id]->disconnect();
 							if($id == $this->currentSessionId) $this->currentSessionId = null;
 							unset($this->sessions[$id]);
-						}else $this->logger->warning("Invalid session ID!");
+						}else $this->logger->warning("Invalid SessionID!");
 					}
 
 					break;
 				case "version":
-					$this->logger->info(TextFormat::AQUA . "GeniRCON Client" . TextFormat::WHITE . " [version: " . TextFormat::LIGHT_PURPLE . self::VER . TextFormat::WHITE . "] (protocol version: " . TextFormat::GOLD . GeniRCON::PROTOCOL_VERSION . TextFormat::WHITE . ")");
+					$this->logger->info(TextFormat::AQUA . "GeniRCON Client" . TextFormat::WHITE . " [Version: " . TextFormat::LIGHT_PURPLE . self::VER . TextFormat::WHITE . "] (Protocol version: " . TextFormat::GOLD . GeniRCON::PROTOCOL_VERSION . TextFormat::WHITE . ")");
 
 					break;
 				case "exit":
@@ -830,7 +856,7 @@ class GeniRCONClient{
 						if(count($args) == 0){
 							$this->logger->info("-------  Help  -------");
 							foreach($this->commandList as $k => $cmd){
-								$this->logger->info("/" . TextFormat::DARK_GREEN . $k . ": " . TextFormat::WHITE . $cmd[1]);
+								$this->logger->info(TextFormat::DARK_GREEN . "/" . $k . ": " . TextFormat::WHITE . $cmd[1]);
 							}
 						}else{
 							if(isset($this->commandList[$args[0]])){
