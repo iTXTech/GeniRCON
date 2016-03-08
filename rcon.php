@@ -761,7 +761,8 @@ class GeniRCONClient{
 
 					//Title
 
-					echo "\x1b]0;" . $this->getName() . " " .
+					echo "\x1b]0;" . $this->getName() . " - " .
+						$this->getCurrentSession()->getSessionId() .
 						" | Online " . $status["online"] . "/" . $status["max"] .
 						" | Memory " . $status["usage"] .
 						" | U " . $status["upload"] .
